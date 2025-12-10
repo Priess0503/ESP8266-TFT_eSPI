@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 class SimpleServerMonitor:
     def __init__(self):
-        self.websocket_url = "wss://tz.bbskali.cn/api/v1/ws/server"
+        self.websocket_url = "wss://nb.bbskali.cn/api/v1/ws/server"
         self.http_host = "192.168.50.48"
         self.http_port = 8080
         self.data_cache = None
