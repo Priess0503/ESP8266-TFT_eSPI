@@ -12,8 +12,8 @@ TFT_eSPI tft = TFT_eSPI();
 OpenFontRender render;  // 创建中文渲染对象
 
 // WiFi 参数（保持不变）
-const char *WIFI_SSID = "Xiaoyaozi";
-const char *WIFI_PASS = "zhanglu742206@@";
+const char *WIFI_SSID = "kali笔记";
+const char *WIFI_PASS = "nbxiaoyaozi";
 // API 参数（保持不变）
 const char *API_URL = "http://192.168.50.48:8080/";
 const char *API_HOST = "192.168.50.48";
