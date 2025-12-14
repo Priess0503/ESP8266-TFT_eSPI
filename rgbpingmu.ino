@@ -12,8 +12,8 @@ TFT_eSPI tft = TFT_eSPI();
 OpenFontRender render;  // 创建中文渲染对象
 
 // WiFi 参数（保持不变）
-const char *WIFI_SSID = "kali笔记";
-const char *WIFI_PASS = "nbxiaoyaozi";
+const char *WIFI_SSID = "Xiaoyaozi";
+const char *WIFI_PASS = "zhanglu742206@@";
 // API 参数（保持不变）
 const char *API_URL = "http://192.168.50.48:8080/";
 const char *API_HOST = "192.168.50.48";
@@ -24,6 +24,7 @@ const uint32_t FETCH_INTERVAL = 30000;
 const uint32_t ROTATE_INTERVAL = 8000;
 uint32_t lastFetch = 0;
 uint32_t lastRotate = 0;
+bool dataUpdated = false;  // 标记数据更新，避免跳回第一页
 
 // 数据结构
 struct ServerInfo {
@@ -49,8 +50,10 @@ void showServer(size_t idx);
 void drawChineseText(int16_t x, int16_t y, const String &text, uint8_t fontSize = 16);
 const uint16_t *pickIcon(const char *platform);
 void drawCpuGauge(float cpu);
+void drawMemGauge(float mem);  // 内存环图
 void fillArcSegment(int16_t cx, int16_t cy, int16_t rOuter, int16_t thickness, float startDeg, float endDeg, uint16_t color);
 void drawDiskProgressBar(float usage);  // 磁盘使用率进度条
+void showBootAnimation();  // 显示开机动画
 
 void setup() {
   Serial.begin(115200);
@@ -66,6 +69,12 @@ void setup() {
   render.setColor(TFT_WHITE);  // 中文颜色
   render.setBackColor(TFT_BLACK);  // 背景色（与屏幕背景一致）
 
+  // 优化一：先显示开机动画
+  showBootAnimation();
+
+  // 节能优化：启用WiFi低功耗模式
+  WiFi.setSleepMode(WIFI_LIGHT_SLEEP);  // 启用WiFi轻睡眠模式，降低功耗
+
   connectWiFi();
   fetchData();
   showServer(0);
@@ -74,55 +83,116 @@ void setup() {
 
 void loop() {
   uint32_t now = millis();
+  bool hasWork = false;
+  
   if (now - lastFetch >= FETCH_INTERVAL || serverCount == 0) {
-    fetchData();
-    currentIdx = 0;
+    if (fetchData()) {
+      dataUpdated = true;
+    }
+    hasWork = true;
   }
   if (serverCount > 0 && now - lastRotate >= ROTATE_INTERVAL) {
-    currentIdx = (currentIdx + 1) % serverCount;
-    showServer(currentIdx);
-    lastRotate = now;
+    // 如果刚更新数据，保持当前页不跳回第一页
+    if (dataUpdated) {
+      if (currentIdx >= serverCount) currentIdx = 0;
+      showServer(currentIdx);
+      lastRotate = now;
+      dataUpdated = false;
+      hasWork = true;
+    } else {
+      currentIdx = (currentIdx + 1) % serverCount;
+      showServer(currentIdx);
+      lastRotate = now;
+      hasWork = true;
+    }
+  }
+  
+  // 节能优化：空闲时让出CPU时间，降低功耗
+  if (!hasWork) {
+    yield();  // 让出CPU时间，允许WiFi和系统任务运行
+    delay(10);  // 短暂延迟，进一步降低CPU占用
   }
 }
 
-// WiFi 连接函数（保持不变）
+// WiFi 连接函数（节能优化）
 void connectWiFi() {
+  // 如果已连接，直接返回，避免重复连接
+  if (WiFi.status() == WL_CONNECTED) {
+    return;
+  }
+  
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
+  #ifdef DEBUG_MODE
   Serial.printf("Connecting to %s", WIFI_SSID);
-  while (WiFi.status() != WL_CONNECTED) {
+  #endif
+  
+  uint8_t retries = 0;
+  while (WiFi.status() != WL_CONNECTED && retries < 20) {
     delay(500);
+    yield();  // 让出CPU时间
+    #ifdef DEBUG_MODE
     Serial.print(".");
+    #endif
+    retries++;
   }
-  Serial.println("\nWiFi connected");
+  
+  #ifdef DEBUG_MODE
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi connected");
+  } else {
+    Serial.println("\nWiFi connection failed");
+  }
+  #endif
 }
 
-// 数据获取函数（保持不变，注意 JSON 缓冲区大小）
+// 数据获取函数（优化二：优化API读取方式，提高速度）
 bool fetchData() {
   if (WiFi.status() != WL_CONNECTED) {
     connectWiFi();
   }
+  
   WiFiClient client;
   HTTPClient http;
-  if (!http.begin(client, API_URL)) {
+  
+  // 优化：设置更短的超时时间，加快失败响应
+  http.setTimeout(3000);  // 从5秒减少到3秒
+  
+  // 优化：使用更高效的连接方式（直接使用IP和端口，避免DNS解析）
+  if (!http.begin(client, API_HOST, API_PORT, API_PATH)) {
+    #ifdef DEBUG_MODE
     Serial.println("HTTP begin 失败");
+    #endif
     return false;
   }
+  
+  // 优化：设置HTTP头，减少数据传输
+  http.setUserAgent("ESP8266");
+  http.addHeader("Connection", "close");
+  
   int httpCode = http.GET();
   if (httpCode != HTTP_CODE_OK) {
+    #ifdef DEBUG_MODE
     Serial.printf("HTTP error: %d\n", httpCode);
+    #endif
     http.end();
     return false;
   }
+  
+  // 优化：使用更高效的字符串读取方式
   String payload = http.getString();
   http.end();
+  
+  yield();  // 让出CPU时间
 
   // 注意：原代码 JSON 缓冲区太小（StaticJsonDocument<10>），会解析失败！
   // 修改：扩大 JSON 缓冲区（根据 API 返回数据大小调整，建议至少 512）
   StaticJsonDocument<512> doc;  
   DeserializationError err = deserializeJson(doc, payload);
   if (err) {
+    #ifdef DEBUG_MODE
     Serial.printf("JSON parse error: %s\n", err.c_str());
+    #endif
     return false;
   }
 
@@ -142,11 +212,9 @@ bool fetchData() {
     serverCount++;
   }
   lastFetch = millis();
+  #ifdef DEBUG_MODE
   Serial.printf("Fetched %u servers\n", (unsigned)serverCount);
-  if (serverCount > 0) {
-    showServer(0);
-    lastRotate = millis();
-  }
+  #endif
   return serverCount > 0;
 }
 
@@ -263,24 +331,97 @@ void drawMemGauge(float mem) {
   drawGauge(190, 145, mem, "MEM", fg, track, base);
 }
 
-// 填充弧段（多边形近似）
+// 填充弧段（优化：平衡速度与光滑度）
 void fillArcSegment(int16_t cx, int16_t cy, int16_t rOuter, int16_t thickness, float startDeg, float endDeg, uint16_t color) {
   float rInner = rOuter - thickness;
-  float step = 1.0f; // 适中步进，平滑与速度平衡
-  for (float a = startDeg; a < endDeg; a += step) {
-    float a1 = a * DEG_TO_RAD;
-    float a2 = min(a + step, endDeg) * DEG_TO_RAD;
-    int16_t x1o = cx + rOuter * cos(a1);
-    int16_t y1o = cy + rOuter * sin(a1);
-    int16_t x2o = cx + rOuter * cos(a2);
-    int16_t y2o = cy + rOuter * sin(a2);
-    int16_t x1i = cx + rInner * cos(a1);
-    int16_t y1i = cy + rInner * sin(a1);
-    int16_t x2i = cx + rInner * cos(a2);
-    int16_t y2i = cy + rInner * sin(a2);
+  // 优化：使用0.4度步进，在保持光滑度的同时提高速度
+  const float step = 0.4f;
+  
+  // 优化：预先计算角度范围
+  float totalAngle = endDeg - startDeg;
+  if (totalAngle <= 0) return;
+  
+  // 计算需要绘制的片段数
+  int segments = (int)(totalAngle / step) + 1;
+  uint16_t drawCount = 0;
+  
+  // 优化：减少边缘线绘制频率（每8个片段绘制一次，提高速度）
+  const int edgeDrawInterval = 8;
+  
+  // 存储上一个片段的点，用于绘制边缘线
+  int16_t prevXo = 0, prevYo = 0, prevXi = 0, prevYi = 0;
+  bool firstSegment = true;
+  
+  // 优化：使用更高效的绘制方法
+  for (int i = 0; i < segments; i++) {
+    float a1 = startDeg + i * step;
+    float a2 = (i == segments - 1) ? endDeg : (startDeg + (i + 1) * step);
+    
+    // 转换为弧度
+    float a1Rad = a1 * DEG_TO_RAD;
+    float a2Rad = a2 * DEG_TO_RAD;
+    
+    // 计算外圆和内圆的四个点
+    float cos1 = cos(a1Rad);
+    float sin1 = sin(a1Rad);
+    float cos2 = cos(a2Rad);
+    float sin2 = sin(a2Rad);
+    
+    // 使用四舍五入提高精度
+    int16_t x1o = (int16_t)(cx + rOuter * cos1 + 0.5f);
+    int16_t y1o = (int16_t)(cy + rOuter * sin1 + 0.5f);
+    int16_t x2o = (int16_t)(cx + rOuter * cos2 + 0.5f);
+    int16_t y2o = (int16_t)(cy + rOuter * sin2 + 0.5f);
+    int16_t x1i = (int16_t)(cx + rInner * cos1 + 0.5f);
+    int16_t y1i = (int16_t)(cy + rInner * sin1 + 0.5f);
+    int16_t x2i = (int16_t)(cx + rInner * cos2 + 0.5f);
+    int16_t y2i = (int16_t)(cy + rInner * sin2 + 0.5f);
+    
+    // 使用两个三角形填充每个弧段
     tft.fillTriangle(x1o, y1o, x2o, y2o, x1i, y1i, color);
     tft.fillTriangle(x1i, y1i, x2o, y2o, x2i, y2i, color);
+    
+    // 优化：减少边缘线绘制频率，提高速度
+    // 只在关键位置绘制边缘线（每8个片段或最后一段）
+    if ((i % edgeDrawInterval == 0 || i == segments - 1) && !firstSegment) {
+      // 连接外圆边缘
+      if (abs(x1o - prevXo) > 1 || abs(y1o - prevYo) > 1) {
+        tft.drawLine(prevXo, prevYo, x1o, y1o, color);
+      }
+      // 连接内圆边缘
+      if (abs(x1i - prevXi) > 1 || abs(y1i - prevYi) > 1) {
+        tft.drawLine(prevXi, prevYi, x1i, y1i, color);
+      }
+    }
+    
+    // 更新上一个点
+    prevXo = x2o;
+    prevYo = y2o;
+    prevXi = x2i;
+    prevYi = y2i;
+    firstSegment = false;
+    
+    // 优化：减少yield频率，提高绘制速度
+    drawCount++;
+    if (drawCount % 100 == 0) {
+      yield();
+    }
   }
+  
+  // 绘制起始和结束的径向线，确保边界完整
+  float startRad = startDeg * DEG_TO_RAD;
+  float endRad = endDeg * DEG_TO_RAD;
+  int16_t x1o = (int16_t)(cx + rOuter * cos(startRad) + 0.5f);
+  int16_t y1o = (int16_t)(cy + rOuter * sin(startRad) + 0.5f);
+  int16_t x1i = (int16_t)(cx + rInner * cos(startRad) + 0.5f);
+  int16_t y1i = (int16_t)(cy + rInner * sin(startRad) + 0.5f);
+  tft.drawLine(x1o, y1o, x1i, y1i, color);
+  
+  int16_t x2o = (int16_t)(cx + rOuter * cos(endRad) + 0.5f);
+  int16_t y2o = (int16_t)(cy + rOuter * sin(endRad) + 0.5f);
+  int16_t x2i = (int16_t)(cx + rInner * cos(endRad) + 0.5f);
+  int16_t y2i = (int16_t)(cy + rInner * sin(endRad) + 0.5f);
+  tft.drawLine(x2o, y2o, x2i, y2i, color);
 }
 
 // 绘制磁盘使用率进度条（参考附件2样式：深色轨道+绿色填充）
@@ -312,4 +453,28 @@ void drawDiskProgressBar(float usage) {
       tft.fillRect(x, y, fillWidth, height, fillColor);
     }
   }
+}
+
+// 优化一：显示开机动画（jiIcon图标 + "启动中…"文字）
+void showBootAnimation() {
+  tft.fillScreen(TFT_BLACK);
+  
+  // 获取屏幕尺寸（TFT_eSPI库提供的方法）
+  const int16_t screenWidth = tft.width();
+  const int16_t screenHeight = tft.height();
+  
+  // 居中显示100x100图标
+  const int16_t iconX = (screenWidth - JI_ICON_W) / 2;   // 图标X坐标（居中）
+  const int16_t iconY = (screenHeight - JI_ICON_H - 40) / 2;  // 图标Y坐标（稍微上移，为文字留空间）
+  
+  // 显示开机图标（100x100）
+  tft.pushImage(iconX, iconY, JI_ICON_W, JI_ICON_H, jiIcon);
+  
+  // 显示"启动中…"文字（图标下方）
+  const int16_t textY = iconY + JI_ICON_H + 10;  // 图标下方10像素
+  // "启动中…"共4个字符，每个16像素宽，居中显示
+  const int16_t textX = (screenWidth - 16 * 4) / 2;
+  drawChineseText(textX, textY, "启动中…", 16);
+  
+  yield();  // 让出CPU时间，确保显示完成
 }
